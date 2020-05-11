@@ -1,32 +1,43 @@
 package main
 
 import (
-	"bytes"
-	"encoding/gob"
 	"fmt"
 	"log"
 	"net"
 	"runtime"
+	"sync"
 )
 
 type Client struct {
 	Name        string
 	Addr        string
-	MessageChan chan interface{}
+	MessageChan chan string
 }
 
-var userList = make(map[string]Client)
+type userList struct {
+	users map[string]Client
+	mux   sync.Mutex
+}
 
-var message = make(chan interface{})
+func addUser(users *userList, client Client) {
+	users.mux.Lock()
+	users.users[client.Addr] = client
+	users.mux.Unlock()
+}
 
-func getBytes(msg interface{}) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := gob.NewEncoder(&buf)
-	err := enc.Encode(msg)
-	if err != nil {
-		return nil, err
+func broadCastUsers(users *userList, msg string) {
+	users.mux.Lock()
+	defer users.mux.Unlock()
+	for _, user := range users.users {
+		user.MessageChan <- msg
 	}
-	return buf.Bytes(), nil
+}
+
+var message = make(chan string)
+
+var onlineUsers = userList{
+	users: make(map[string]Client),
+	mux:   sync.Mutex{},
 }
 
 func handleConnect(conn net.Conn) {
@@ -37,21 +48,15 @@ func handleConnect(conn net.Conn) {
 	client := Client{
 		Name:        clientAddr,
 		Addr:        clientAddr,
-		MessageChan: make(chan interface{}),
+		MessageChan: make(chan string),
 	}
 
-	userList[clientAddr] = client
+	addUser(&onlineUsers, client)
 
 	go func() {
 		for {
 			msg := <-client.MessageChan
-
-			content, err := getBytes(msg)
-			if err != nil {
-				fmt.Printf("Error when converting interface to bytes array: %v", err)
-				continue
-			}
-			_, err = conn.Write(content)
+			_, err := conn.Write([]byte(msg + "\n"))
 			if err != nil {
 				fmt.Printf("Error when writing message to client: %v", err)
 			}
@@ -69,9 +74,7 @@ func handleConnect(conn net.Conn) {
 func Manager() {
 	for {
 		msg := <-message
-		for _, user := range userList {
-			user.MessageChan <- msg
-		}
+		broadCastUsers(&onlineUsers, msg)
 	}
 }
 
